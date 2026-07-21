@@ -94,7 +94,7 @@ class HyperGraphMessageNet(nn.Module):
             delta_node = self.node_updater[layer_idx](combined_node)
             node_emb = node_emb + delta_node
 
-        if self.problem_type == "subset_sum":
+        if self.problem_type in ("subset_sum", "hypermaxcut", "hypermultiwaycut"):
             logits = self.edge_decoder(node_emb)
         else:
             logits = self.edge_decoder(edge_emb)
