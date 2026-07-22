@@ -475,9 +475,10 @@ def train_model(model: torch.nn.Module,
     meltdown_floor = 0.05
     meltdown_cov_threshold = 0.05
     
-    meltdown_limit = 3
+    meltdown_limit = 10
     meltdown_times = 0
     meltdown_streak = 0
+    noise_inject_streak = 0
 
     local_max_epochs = params.get('max_epochs', 200)
     local_patience = params.get('patience', 10)
@@ -546,6 +547,11 @@ def train_model(model: torch.nn.Module,
         else:
             meltdown_streak = 0
 
+        if cov_ratio < coverage_floor:
+            noise_inject_streak += 1
+        else:
+            noise_inject_streak = 0
+
         can_meltdown = (best_cov_so_far < meltdown_cov_threshold)
         if (meltdown_streak >= meltdown_limit
             and meltdown_times < 2
@@ -566,8 +572,10 @@ def train_model(model: torch.nn.Module,
         else:
             meltdown_done = False
             meltdown_exhausted_or_disabled = (meltdown_times >= 2) or (not can_meltdown)
-            if meltdown_exhausted_or_disabled and (cov_ratio < coverage_floor):
+            if (meltdown_exhausted_or_disabled and (cov_ratio < coverage_floor)
+                and noise_inject_streak >= meltdown_limit):
                 print(f"[!] meltdown not possible => injecting noise. coverage= {cov_ratio:.4f}")
+                noise_inject_streak = 0
                 coverage_injection(model, scale=0.05)
                 p_inj = model(incidence_matrix)
                 if problem_type not in ["hypermultiwaycut"]:
@@ -676,7 +684,7 @@ def train_model(model: torch.nn.Module,
                 break
         elif problem_type in ["hypermaxcut", "hypermultiwaycut"]:
             n_nodes = incidence_matrix.size(0)
-            threshold_coverage = 0.80 if n_nodes < 1000 else 0.9
+            threshold_coverage = 0.9 if n_nodes < 1000 else 0.99
             if cov_ratio >= threshold_coverage:
                 print(f"High coverage/cut ratio ≥{threshold_coverage} => early stop (n_nodes={n_nodes}).")
                 break

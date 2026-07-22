@@ -48,3 +48,8 @@ temp_*
 dist/
 build/
 *.egg-info/
+
+# 
+paper.pdf
+logs
+run.sh
