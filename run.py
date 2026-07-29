@@ -472,7 +472,7 @@ def process_hypermaxcut_instance(file_path, params, model=None, skip_train=False
 
         difficulty_param = (sum(len(s) for s in subsets) / len(subsets)) / num_nodes if subsets else 0.0
         logger.start({
-            "method": "ours",
+            "method": "hypersolver",
             "problem_type": "maxcut",
             "instance_id": compute_instance_id(file_path),
             "instance_size": num_nodes,

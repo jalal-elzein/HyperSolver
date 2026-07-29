@@ -13,7 +13,7 @@ class RunLogger:
     post_refinement boundary instead of each phase resetting to 0.
     """
 
-    PROJECT = "hypergraph-csp-eval"
+    PROJECT = "hypergraph-csp-eval-test"
 
     def __init__(self):
         if not os.environ.get("WANDB_API_KEY"):
