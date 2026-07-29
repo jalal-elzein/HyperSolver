@@ -12,6 +12,9 @@ tqdm>=4.60.0
 matplotlib>=3.5.0
 scikit-learn>=1.0.0
 
+# Experiment tracking
+wandb>=0.16.0
+
 # Optional: CPLEX solver for comparison (requires separate license)
 # cplex>=22.0.0
 # docplex>=2.25.0

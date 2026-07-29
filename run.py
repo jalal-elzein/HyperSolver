@@ -5,6 +5,10 @@ import gc
 import time
 import math
 import argparse
+import random
+from pathlib import Path
+
+import numpy as np
 
 from src.trainer import train_model, get_final_raw_solution
 from src.data_reading import (
@@ -24,6 +28,35 @@ from src.utils import (
     post_process_solution_hypermaxcut,
     post_process_solution_subset_sum
 )
+from src.wandb_logger import RunLogger
+
+
+BENCHMARK_ROOT = Path(os.environ.get("BENCHMARK_ROOT", "./data")).resolve()
+if "BENCHMARK_ROOT" not in os.environ:
+    print(f"[Warning] BENCHMARK_ROOT not set; defaulting to {BENCHMARK_ROOT}. "
+          f"Set BENCHMARK_ROOT for cross-method instance_id matching in future evals.")
+
+
+def compute_instance_id(file_path):
+    """
+    instance_id per wandb_tracking_spec.md Section 5: the loaded file's absolute
+    path, made relative to BENCHMARK_ROOT, with forward slashes.
+    """
+    resolved = Path(file_path).resolve()
+    try:
+        return str(resolved.relative_to(BENCHMARK_ROOT)).replace("\\", "/")
+    except ValueError:
+        print(f"[Warning] {resolved} is not under BENCHMARK_ROOT={BENCHMARK_ROOT}; "
+              f"using bare filename as instance_id.")
+        return resolved.name
+
+
+def set_all_seeds(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def print_nn_analysis(stats, problem_type="set_cover"):
@@ -421,7 +454,12 @@ def process_subset_sum_instance(file_path, params, model=None, skip_train=False,
         return None
 
 
-def process_hypermaxcut_instance(file_path, params, model=None, skip_train=False, reference_shape=None):
+def process_hypermaxcut_instance(file_path, params, model=None, skip_train=False, reference_shape=None, seed=0):
+    # Constructed before the try/except below so a missing WANDB_API_KEY fails
+    # loudly instead of being swallowed as "Error processing hypermaxcut instance".
+    logger = RunLogger()
+    set_all_seeds(seed)
+
     try:
         subsets, elements, header = read_hypermaxcut_instance(file_path)
         num_nodes = int(header[0])
@@ -432,65 +470,90 @@ def process_hypermaxcut_instance(file_path, params, model=None, skip_train=False
             print("  [Shape mismatch: skipping file.]")
             return None
 
-        inc_mat = generate_incidence_matrix(subsets, elements).float()
-        inc_mat = inc_mat.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        difficulty_param = (sum(len(s) for s in subsets) / len(subsets)) / num_nodes if subsets else 0.0
+        logger.start({
+            "method": "ours",
+            "problem_type": "maxcut",
+            "instance_id": compute_instance_id(file_path),
+            "instance_size": num_nodes,
+            "difficulty_param": difficulty_param,
+            "seed": seed,
+            "condition": "n/a",
+            "pretrain_scale": "n/a",
+            "time_budget_s": None,
+        })
 
-        feasible = check_problem_feasibility(inc_mat, "hypermaxcut")
-        if not feasible:
-            print("HyperMaxCut instance infeasible.")
-            return None
+        try:
+            inc_mat = generate_incidence_matrix(subsets, elements).float()
+            inc_mat = inc_mat.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-        if model is None:
-            model = build_model_for_shape("hypermaxcut", (num_nodes, num_hypered), params)
+            feasible = check_problem_feasibility(inc_mat, "hypermaxcut")
+            if not feasible:
+                print("HyperMaxCut instance infeasible.")
+                return None
 
-        train_start = time.time()
-        if not skip_train:
-            best_probs = train_model(model, inc_mat, params, problem_type="hypermaxcut", extra_info=None)
-        else:
-            model.eval()
-            with torch.no_grad():
-                out_ = model(inc_mat)
-                out_ = out_.clamp(1e-3, 1 - 1e-3)
-            best_probs = out_
-        training_time = time.time() - train_start
+            if model is None:
+                model = build_model_for_shape("hypermaxcut", (num_nodes, num_hypered), params)
 
-        map_start = time.time()
-        nn_stats = get_final_raw_solution(best_probs, inc_mat, "hypermaxcut", extra_info=None)
-        total_get_sol_time = time.time() - map_start
+            train_start = time.time()
+            if not skip_train:
+                best_probs = train_model(model, inc_mat, params, problem_type="hypermaxcut",
+                                         extra_info=None, logger=logger)
+            else:
+                model.eval()
+                with torch.no_grad():
+                    out_ = model(inc_mat)
+                    out_ = out_.clamp(1e-3, 1 - 1e-3)
+                best_probs = out_
+            training_time = time.time() - train_start
 
-        raw_post_time = nn_stats.get('raw_post_time', 0.0)
-        mapping_time = max(0.0, total_get_sol_time - raw_post_time)
+            map_start = time.time()
+            nn_stats = get_final_raw_solution(best_probs, inc_mat, "hypermaxcut", extra_info=None)
+            total_get_sol_time = time.time() - map_start
 
-        print_nn_analysis(nn_stats, "hypermaxcut")
+            raw_post_time = nn_stats.get('raw_post_time', 0.0)
+            mapping_time = max(0.0, total_get_sol_time - raw_post_time)
 
-        post_time = 0.0
-        final_sol = nn_stats['solution'].clone()
-        final_val = True
-        post_ratio = nn_stats['coverage_ratio']
+            print_nn_analysis(nn_stats, "hypermaxcut")
 
-        if not skip_train:
-            post_start = time.time()
-            extra_pp_time = time.time() - post_start
-            post_time = raw_post_time + extra_pp_time
+            post_time = 0.0
+            final_sol = nn_stats['solution'].clone()
+            final_val = True
+            post_ratio = nn_stats['coverage_ratio']
 
-            print("\n-- Post-Processed HyperMaxCut Solution --")
-            print(f"Fraction of hyperedges cut (post-processed): {post_ratio:.4f}")
-            print(f"Size (side=1): {(final_sol >= 0.5).sum().item()}")
-            sel_idx = (final_sol >= 0.5).nonzero(as_tuple=True)[0].tolist()
-            print(f"Nodes in side=1: {sel_idx}\n")
-        else:
-            print("\n[Skip post-processing because skip_train=True]\n")
+            if not skip_train:
+                post_start = time.time()
+                extra_pp_time = time.time() - post_start
+                post_time = raw_post_time + extra_pp_time
 
-        return {
-            'solution': final_sol,
-            'valid': final_val,
-            'model': model,
-            'shape': (num_nodes, num_hypered),
-            'training_time': training_time,
-            'mapping_time': mapping_time,
-            'post_time': post_time,
-            'total_time': training_time + mapping_time + post_time
-        }
+                print("\n-- Post-Processed HyperMaxCut Solution --")
+                print(f"Fraction of hyperedges cut (post-processed): {post_ratio:.4f}")
+                print(f"Size (side=1): {(final_sol >= 0.5).sum().item()}")
+                sel_idx = (final_sol >= 0.5).nonzero(as_tuple=True)[0].tolist()
+                print(f"Nodes in side=1: {sel_idx}\n")
+            else:
+                print("\n[Skip post-processing because skip_train=True]\n")
+
+            logger.log_step("post_refinement", nn_stats['coverage_ratio'])
+            logger.set_summary(
+                t_pre_refinement_total_s=training_time,
+                t_post_refinement_total_s=raw_post_time,
+                final_quality_raw=nn_stats.get('raw_chosen_coverage_ratio', nn_stats['coverage_ratio']),
+                final_quality_refined=nn_stats['coverage_ratio'],
+            )
+
+            return {
+                'solution': final_sol,
+                'valid': final_val,
+                'model': model,
+                'shape': (num_nodes, num_hypered),
+                'training_time': training_time,
+                'mapping_time': mapping_time,
+                'post_time': post_time,
+                'total_time': training_time + mapping_time + post_time
+            }
+        finally:
+            logger.finish()
 
     except Exception as e:
         print(f"Error processing hypermaxcut instance: {e}")
@@ -579,6 +642,9 @@ def main():
                         help="Mode to run.")
     parser.add_argument("--pretrained_model_path", type=str, default="",
                         help="Path to save/load model state dict.")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed (hypermaxcut only; used for the W&B "
+                             "10-independent-runs-per-instance methodology).")
     args = parser.parse_args()
 
     if args.problem == "subset_sum":
@@ -725,7 +791,7 @@ def main():
                 out = process_subset_sum_instance(fpath, params, None, skip_train=False)
             elif args.problem == "hypermaxcut":
                 shp = parse_shape_hypermaxcut(fpath)
-                out = process_hypermaxcut_instance(fpath, params, None, skip_train=False)
+                out = process_hypermaxcut_instance(fpath, params, None, skip_train=False, seed=args.seed)
             else:
                 shp = parse_shape_hypermultiwaycut(fpath, config)
                 out = process_hypermultiwaycut_instance(fpath, params, None, skip_train=False)
@@ -846,7 +912,7 @@ def main():
             elif args.problem == "subset_sum":
                 out = process_subset_sum_instance(fpath, params, new_model, skip_train=True)
             elif args.problem == "hypermaxcut":
-                out = process_hypermaxcut_instance(fpath, params, new_model, skip_train=True)
+                out = process_hypermaxcut_instance(fpath, params, new_model, skip_train=True, seed=args.seed)
             else:
                 out = process_hypermultiwaycut_instance(fpath, params, new_model, skip_train=True)
 
@@ -946,7 +1012,7 @@ def main():
             elif args.problem == "subset_sum":
                 out = process_subset_sum_instance(fpath, params, new_model, skip_train=False)
             elif args.problem == "hypermaxcut":
-                out = process_hypermaxcut_instance(fpath, params, new_model, skip_train=False)
+                out = process_hypermaxcut_instance(fpath, params, new_model, skip_train=False, seed=args.seed)
             else:
                 out = process_hypermultiwaycut_instance(fpath, params, new_model, skip_train=False)
 
@@ -974,7 +1040,7 @@ def main():
             elif args.problem == "subset_sum":
                 out = process_subset_sum_instance(fpath, params, None, skip_train=False)
             elif args.problem == "hypermaxcut":
-                out = process_hypermaxcut_instance(fpath, params, None, skip_train=False)
+                out = process_hypermaxcut_instance(fpath, params, None, skip_train=False, seed=args.seed)
             else:
                 out = process_hypermultiwaycut_instance(fpath, params, None, skip_train=False)
 

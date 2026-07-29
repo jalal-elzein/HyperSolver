@@ -456,7 +456,8 @@ def train_model(model: torch.nn.Module,
                 incidence_matrix: torch.Tensor,
                 params: dict,
                 problem_type: str = "set_cover",
-                extra_info=None) -> torch.Tensor:
+                extra_info=None,
+                logger=None) -> torch.Tensor:
     """
     Main training loop with unified adaptive restart mechanism.
     *Uses unified meltdown threshold of 0.05 for all problem types
@@ -540,6 +541,9 @@ def train_model(model: torch.nn.Module,
 
         if cov_ratio > best_cov_so_far:
             best_cov_so_far = cov_ratio
+
+        if logger:
+            logger.log_step("pre_refinement", cov_ratio)
 
         meltdown_done = False
         if cov_ratio < meltdown_floor:
