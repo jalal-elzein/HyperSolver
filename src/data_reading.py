@@ -115,6 +115,8 @@ def read_hypermaxcut_instance(file_path):
     Reads a hypergraph maxcut instance.
     First line: <num_nodes> <num_hyperedges>
     Next lines: each line is a hyperedge (list of node IDs).
+    Node IDs may be 0-indexed (0..num_nodes-1) or 1-indexed (1..num_nodes);
+    the convention is auto-detected from whether a 0 ID appears.
     """
     with open(file_path, 'r') as f:
         lines = [ln.strip() for ln in f.readlines()]
@@ -128,7 +130,8 @@ def read_hypermaxcut_instance(file_path):
         row = list(map(int, lines[i+1].split()))
         hyperedges.append(row)
     header = [str(num_nodes), str(num_hypered)]
-    elements = list(range(1, num_nodes+1))
+    zero_indexed = any(0 in row for row in hyperedges)
+    elements = list(range(0, num_nodes)) if zero_indexed else list(range(1, num_nodes+1))
     return hyperedges, elements, header
 
 def read_hitting_set_instance(file_path):
